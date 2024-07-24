@@ -1,0 +1,167 @@
+<html>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@3.4.1/dist/css/bootstrap.min.css" integrity="sha384-HSMxcRTRxnN+Bdg0JdbxYKrThecOKuH5zCYotlSAcp1+c8xmyTe9GYg1l9a69psu" crossorigin="anonymous">
+    <title>Demo of an interrupt-based microcontroller state machine</title>
+  </head>
+  <body class="container">
+    <h1>Demo of an interrupt-based microcontroller state machine for controlling an amateur radio repeater</h1>
+    <h2>What should be the logic of the repeater controller</h2>
+    <p>The repeater should enable its transmitter when it receives a signal, and generate a callsign in Morse code and add it to the voice signal. Then, when the received signal is inactive AND the callsign stops being generated, the transmitter should be switched off. In addition, the repeater is equipped with a CTCSS decoder. When the receiver receives a signal but without the CTCSS tone, we should assume that no useful signal is being received.</p>
+    <p>The repeater's callsign is repeated every 10 seconds in the demo, or 5 minutes in the final version, unless the repeater doesn't repeat any signal. The time of 5 minutes is chosen to avoid disrupting of the voice transmission while fulfilling the legal requirements to repeat the callsign </p>
+    <p>Outputs from the carrier wave detector and the CTCSS decoder are connected to microcontroller's interrupt pins. The pins are configured to generate interrupts on the rising and falling edge of the signal (carrier and CTCSS start and end, total 2 pins and 4 interrupt handlers). Moreover, the microcontroller's timer is configured to generate an interrupt every 1/8 second. This interrupt is used to change state of the sine wave generator to generate the Morse code callsign.</p>
+
+    <h2>How to use this demo</h2>
+    <p>The code, written in JavaScript, mimics the code written for a microcontroller, typically written in C. In this code, interrupt service routines are simulated by click handlers and setInterval timers. Setting the state of GPIO outputs is simulated by a checkbox.</p>
+    <ul>
+      <li>To indicate that there is a carrier wave, press button "Carrier start". Simply having a carrier wave without CTCSS doesn't activate the repeater.</li>
+      <li>To indicate that there is a CTCSS signal, press button "CTCSS start".</li>
+      <li>To indicate that the carrier wave and CTCSS stops, press button "Carrier stop"</li>
+      <li>If you want to hear the Morse code, use button "Activate sound"</li>
+    </ul>
+    <p>Feel free to look up the JavaScript code in the source of this page.</p>
+    <p>The code was written so that it can be easily translated into C code for a microcontroller. It can also serve as a starting point for developing other interrupt-based state machines on microcontrollers.</p>
+
+    <h2>Demo</h2>
+    <div>
+      <button id="carrier-start">Carrier start</button>
+      <button id="ctcss-start">CTCSS start</button>
+      <button id="carrier-stop">Carrier stop</button>
+      <button id="activate-sound">Activate sound</button>
+    </div>
+    <div>Transmitter: <input type="checkbox" id="tx"></div>
+    <div>Morse code sine wave generator: <input type="checkbox" id="beep"></div>
+    
+    <script>
+      // Lookup table stores if the beep generator should be switched on and off.
+
+      // According to the standard timing of Morse code, a dah should be three times longer than a dit. Space between dits and dahs should be one time unit.
+      // Space between letters should be three time units. Space between words should be seven time units.
+
+      // That's why a dit should be encoded as 1 followed by 0. A dah should be encoded as three ones followed by 0.
+      // Space between letters should be encoded as three zeros. Space between words should be encoded as seven zeros.
+
+      // The Morse code for "S" is "...", for "R" is ".-.", for "2" is "..---", and for "Z" is "--.."
+      // SR2Z is a call sign of an existing amateur radio repeater located in Gdynia, Poland. This callsign is used only for the demo, the final code will
+      // use the actual callsign of the repeater after obtaining the license from the appropriate authorities.
+      const morseCodeLookupTable = ([
+        1,0,1,0,1, // S
+        0,0,0,
+        1,0,1,1,1,0,1, // R
+        0,0,0,
+        1,0,1,0,1,1,1,0,1,1,1,0,1,1,1, // 2
+        0,0,0,
+        1,1,1,0,1,1,1,0,1,0,1, // Z
+        0, 0, // last 2 elements to set the oscillator off, and as a placeholder for the case when the morseCodeCounter variable is 0
+      ]).reverse(); // the array is read from the last element, as the Morse code generator will be counting down. In the C version, the array will be already reversed when declared.
+
+      // 10 seconds in the demo, 5 minutes in the final version (may be adjusted to the legal requirements).
+      const callsignRepeatTime = 100; // 10 s, in the 1/10s unit, as currentTime is incremented every 1/10 s
+
+      // ---------------------
+
+      // State variables. In the C code, these variables will be marked as volatile.
+
+      let morseCodeCounter = 0; // 0 when inactive, otherwise the index in the morseCodeLookupTable reversed
+      let isCarrierActive = 0;
+      let isCtcssActive = 0;
+
+      let currentTime = 0; // in 1/20 s
+      let lastCallsignTimestamp = 0;
+
+      // State machine transitions. They should always result in running updateOutput() function.
+
+      function onCarrierStart() {
+        isCarrierActive = 1;
+        updateOutput();
+      }
+
+      function onCtcssStart() {
+        isCtcssActive = 1;
+        updateOutput();
+      }
+
+      function onCarrierStop() {
+        isCarrierActive = 0;
+        updateOutput();
+      }
+
+      function onCtcssStop() {
+        isCtcssActive = 0;
+        updateOutput();
+      }
+
+      function onTimerTick() {
+        currentTime++;
+
+        // Start generating the callsign if there is a signal, and the callsign has not been generated for callsignRepeatTime
+        if (morseCodeCounter === 0 && isCarrierActive && isCtcssActive && currentTime - lastCallsignTimestamp > callsignRepeatTime) {
+          morseCodeCounter = morseCodeLookupTable.length - 1;
+          lastCallsignTimestamp = currentTime;
+        }
+
+        // Advance the Morse code generator state
+        if (morseCodeCounter > 0) {
+          if (morseCodeLookupTable[morseCodeCounter]) {
+            setIsBeeperActive(1);
+          } else {
+            setIsBeeperActive(0);
+          }
+          morseCodeCounter--;
+          updateOutput();
+        }
+      }
+
+      function updateOutput() {
+        // transmitter should be active if the receiver is active OR the callsign is being generated
+        if ((isCarrierActive && isCtcssActive) || morseCodeCounter > 0) {
+          setIsTransmitterActive(1);
+        } else {
+          setIsTransmitterActive(0);
+        }
+      }
+
+      // ---------------------
+
+      // Code simulating the interrupt inputs:
+
+      document.querySelector("#carrier-start").addEventListener("click", onCarrierStart); // on rising edge
+      document.querySelector("#ctcss-start").addEventListener("click", onCtcssStart);
+      document.querySelector("#carrier-stop").addEventListener("click", onCarrierStop); // on falling edge; in the simulation, the same button submits 2 "interrupts"
+      document.querySelector("#carrier-stop").addEventListener("click", onCtcssStop);
+      setInterval(onTimerTick, 100); // timer-based interrupt, 1/10 of second
+
+      // In the simulator, the beep genearator is simulated both by a checkbox and a Web Audio API-based oscillator.
+
+      let toggleGain = null;
+      document.querySelector("#activate-sound").addEventListener("click", () => {
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const oscillator = audioCtx.createOscillator();
+        oscillator.type = "sine";
+        oscillator.frequency.value = 440;
+        oscillator.start();
+
+        gainNode = audioCtx.createGain();
+        oscillator.connect(gainNode);
+        gainNode.connect(audioCtx.destination);
+        gainNode.gain.setValueAtTime(0, audioCtx.currentTime); // start with the sound off
+
+        toggleGain = function(isActive) {
+          gainNode.gain.setValueAtTime(isActive? 1 : 0, audioCtx.currentTime);
+        }
+      });
+
+      // Code simulating the GPIO output:
+
+      function setIsTransmitterActive(isActive) {
+        document.querySelector("#tx").checked = !!isActive;
+      }
+      function setIsBeeperActive(isActive) {
+        document.querySelector("#beep").checked = !!isActive;
+
+        if (toggleGain) toggleGain(isActive);
+      }
+    </script>
+  </body>
+</html>
